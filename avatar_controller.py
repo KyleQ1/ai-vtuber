@@ -129,74 +129,61 @@ class AvatarController:
             return False
     
     async def _authenticate(self):
-        """Authenticate with VTube Studio using saved or new token."""
+        """Authenticate with VTube Studio."""
         try:
-            # Check if we have a saved token
-            token = self._load_token()
+            print("🔑 Authenticating with VTube Studio...")
             
-            if token:
-                print("🔑 Using saved authentication token...")
+            # Check if token already exists and works
+            if self.token_path.exists():
                 try:
-                    # Try to authenticate with saved token
-                    # The token should be automatically loaded from authentication_token_path
-                    # but we may need to set it explicitly
-                    await self.vts.request_authenticate()
-                    self.authenticated = True
-                    print("✓ Authenticated with saved token")
-                    return
+                    response = await self.vts.request_authenticate()
+                    if response and isinstance(response, dict) and response.get('data', {}).get('authenticated'):
+                        self.authenticated = True
+                        print("✓ Authenticated with saved token")
+                        return
+                    else:
+                        # Token invalid, delete it
+                        self.token_path.unlink()
+                        print("⚠️ Old token invalid, requesting new one...")
                 except Exception as e:
-                    print(f"⚠️ Saved token invalid or expired: {e}")
-                    print("   Requesting new token...")
-                    # Delete invalid token file
+                    print(f"⚠️ Token check failed: {e}")
                     try:
-                        if self.token_path.exists():
-                            self.token_path.unlink()
+                        self.token_path.unlink()
                     except:
                         pass
             
-            # Request new token
-            print("🔑 Requesting new authentication token...")
-            print("   → Please click 'Allow' in VTube Studio!")
+            # Request new token - THIS SHOWS THE POPUP
+            print("\n🔑 REQUESTING NEW TOKEN...")
+            print("   👀 LOOK AT VTUBE STUDIO - CLICK 'ALLOW' IN POPUP")
+            print("   ⏳ Waiting for you to click...\n")
             
-            token_response = await self.vts.request_authenticate_token()
-            # Extract token from response if it's a dict, otherwise use directly
-            if isinstance(token_response, dict):
-                token = token_response.get('data', {}).get('authentication_token') or token_response.get('authentication_token')
+            # This shows the popup and waits. The token is saved automatically to the file.
+            # The return value doesn't matter - pyvts saves it to authentication_token_path
+            await self.vts.request_authenticate_token()
+            
+            print("✓ Token request completed (saved to file)")
+            
+            # Now authenticate with the saved token
+            await asyncio.sleep(0.5)
+            response = await self.vts.request_authenticate()
+            
+            # Handle different response types
+            if response is True:
+                self.authenticated = True
+                print("✓ Authenticated successfully!")
+            elif isinstance(response, dict) and response.get('data', {}).get('authenticated'):
+                self.authenticated = True
+                print("✓ Authenticated successfully!")
             else:
-                token = token_response
-            
-            # Save token for future use
-            if token:
-                self._save_token(token)
-            
-            # Authenticate with new token
-            await self.vts.request_authenticate()
-            self.authenticated = True
-            print("✓ Authenticated successfully! Token saved for future use.")
-            
+                self.authenticated = False
+                print(f"✗ Authentication failed: {response}")
+                
         except Exception as e:
-            print(f"✗ Authentication failed: {e}")
+            print(f"✗ Authentication error: {e}")
             self.authenticated = False
     
-    def _load_token(self) -> Optional[str]:
-        """Load authentication token from file."""
-        if self.token_path.exists():
-            try:
-                with open(self.token_path, 'r') as f:
-                    data = json.load(f)
-                    return data.get('token')
-            except Exception as e:
-                print(f"⚠️ Failed to load token: {e}")
-        return None
-    
-    def _save_token(self, token: str):
-        """Save authentication token to file."""
-        try:
-            with open(self.token_path, 'w') as f:
-                json.dump({'token': token}, f)
-            print(f"💾 Token saved to {self.token_path}")
-        except Exception as e:
-            print(f"⚠️ Failed to save token: {e}")
+    # Token management is now handled by pyvts via authentication_token_path
+    # These methods are kept for backward compatibility but not used
     
     async def disconnect(self):
         """Disconnect from VTube Studio."""
@@ -394,7 +381,7 @@ class AvatarController:
         
         try:
             response = await self.vts.request(
-                self.vts.vts_request.requestCurrentModel()
+                self.vts.vts_request.requestCurrentModelInfo()
             )
             return response['data']
         except Exception as e:

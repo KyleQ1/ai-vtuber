@@ -7,15 +7,15 @@ from typing import Optional, List
 from dotenv import load_dotenv
 from openai import OpenAI
 from avatar_controller import AvatarController
-from tts_service import TikTokTTSService
+from tts_factory import TTSFactory
 import pytchat
 
 try:
     import pygame
-    pygame.mixer.init()
     PYGAME_AVAILABLE = True
 except ImportError:
     PYGAME_AVAILABLE = False
+    pygame = None
     print("⚠️ pygame not installed. Install with: pip install pygame")
 
 load_dotenv()
@@ -24,10 +24,17 @@ load_dotenv()
 # CONFIGURATION
 # ============================================================================
 
-# Available voices from: https://github.com/mark-rez/TikTok-Voice-TTS
-ENERGETIC_VOICES = [
-    'en_us_002',  # US Female 2 - young and energetic
-]
+# TTS Configuration - EASY SWITCHING!
+# Change TTS_PROVIDER to switch between providers
+TTS_PROVIDER = "tiktok"  # Options: "tiktok", "elevenlabs"
+
+# Voice selection (provider-specific)
+# TikTok voices: 'en_us_001', 'en_us_002', etc.
+# ElevenLabs voices: 'rachel', 'bella', 'domi', 'josh', etc.
+VOICE_OPTIONS = {
+    "tiktok": ['en_us_001'],  # Cute energetic female voice
+    "elevenlabs": ['rachel', 'bella'],  # Professional female voices
+}
 
 # OpenAI Configuration
 OPENAI_MODEL = "gpt-4o-mini"
@@ -45,8 +52,8 @@ AUDIO_PAUSE_MAX = 0.15
 
 # Avatar configuration
 ENABLE_AVATAR = True  # Set to False to disable VTube Studio integration
-AVATAR_GAIN = 2.5     # Mouth movement sensitivity
-AVATAR_SMOOTHING = 0.7  # Temporal smoothing factor
+AVATAR_GAIN = 8.0     # Mouth movement sensitivity (higher = more movement)
+AVATAR_SMOOTHING = 0.3  # Temporal smoothing factor (lower = faster response)
 
 # YouTube Live Chat configuration
 YOUTUBE_VIDEO_ID = os.environ.get("YOUTUBE_VIDEO_ID")  # Video ID from YouTube URL
@@ -54,7 +61,7 @@ YOUTUBE_VIDEO_ID = os.environ.get("YOUTUBE_VIDEO_ID")  # Video ID from YouTube U
 # Text display configuration
 ENABLE_TEXT_DISPLAY = True
 TEXT_DISPLAY_FILE = "current_text.txt"
-TEXT_DISPLAY_STYLE = "progressive"  # "progressive" (word-by-word) or "full" (all at once)
+TEXT_DISPLAY_STYLE = "full"  # "progressive" (word-by-word) or "full" (all at once)
 
 # ============================================================================
 # AI PROMPTS
@@ -358,12 +365,16 @@ class AudioPlayer:
         # Try pygame first (cross-platform, works on Windows)
         if PYGAME_AVAILABLE:
             try:
+                # Initialize pygame mixer if not already initialized
+                if not pygame.mixer.get_init():
+                    pygame.mixer.init()
+                
                 pygame.mixer.music.load(file_path)
-                # Note: pygame doesn't support speed directly, but we can work around it
                 pygame.mixer.music.play()
-                # Wait for playback to finish
+                
+                # Wait for playback to finish - check in smaller intervals for better Ctrl+C response
                 while pygame.mixer.music.get_busy():
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.05)  # Shorter sleep for faster Ctrl+C response
                 return
             except Exception as e:
                 print(f"⚠️ pygame playback failed: {e}, trying mpv...")
@@ -390,12 +401,20 @@ class AudioPlayer:
         Processes audio in chunks and updates mouth parameter in real-time.
         """
         try:
-            chunk_size = 4096
-            chunk_duration = 0.05 / speed
+            # MP3 is compressed - we need to decode it first
+            # For now, use a simpler approach: estimate timing and use random values
+            # This is crude but works without audio decoding libraries
             
-            for i in range(0, len(audio_data), chunk_size):
-                chunk = audio_data[i:i + chunk_size]
-                await avatar_controller.update_mouth_from_audio(chunk)
+            # Estimate duration
+            duration = len(audio_data) / 16000  # Rough estimate: 16KB/s for MP3
+            chunk_duration = 0.05 / speed
+            num_chunks = int(duration / chunk_duration)
+            
+            import random
+            for i in range(num_chunks):
+                # Simulate speech with random mouth values weighted toward medium opening
+                mouth_value = random.random() * 0.7 + 0.2  # 0.2 to 0.9
+                await avatar_controller._set_parameter("MouthOpen", mouth_value)
                 await asyncio.sleep(chunk_duration)
             
             await avatar_controller.reset_mouth()
@@ -436,59 +455,66 @@ async def audio_producer(
     line_count_ref: list,
     openai_service: OpenAIService,
     youtube_chat: YouTubeChatService,
-    phase_manager: PhaseManager
+    phase_manager: PhaseManager,
+    tts_service,  # TTSInterface instance
+    voice_options: list
 ):
     """Producer: Generate AI lines and TTS audio in the background."""
-    while True:
-        try:
-            if phase_manager.should_switch_phase():
-                phase_name = phase_manager.switch_phase()
-                print(f"\n{'='*60}")
-                print(f"🔄 PHASE SWITCH: Now {phase_name} mode")
-                print(f"{'='*60}\n")
-            
-            # 30% chance to respond to a chat message if available
-            chat_message = None
-            if youtube_chat.is_configured() and random.random() < 0.3:
-                chat_message = youtube_chat.get_random_unread_message()
-            
-            if chat_message:
-                # Generate response to chat message
-                print(f"\n💬 Responding to: [{chat_message['author']}]: {chat_message['text']}")
-                line = await openai_service.generate_line(
-                    phase_manager.is_searching,
-                    [chat_message['text']]
-                )
-            else:
-                # Generate normal line with general context
-                chat_context = youtube_chat.get_recent_context() if youtube_chat.is_configured() else None
-                line = await openai_service.generate_line(
-                    phase_manager.is_searching,
-                    chat_context
-                )
-            
-            voice = random.choice(ENERGETIC_VOICES)
-            
-            line_count_ref[0] += 1
-            phase_manager.increment()
-            count = line_count_ref[0]
-            phase_indicator = phase_manager.get_phase_indicator()
-            
-            print(f"\n🎤 [{count}] {phase_indicator} Voice: {voice}")
-            print(f"💬 AI Generated: {line[:100]}{'...' if len(line) > 100 else ''}")
-            
-            audio_data = await asyncio.to_thread(TikTokTTSService.generate, voice, line)
-            
-            if audio_data:
-                await queue.put((audio_data, count, line))
-                print(f"✓ Generated TTS ({len(audio_data)} bytes) - queued")
-            else:
-                print("✗ Failed to generate audio - skipping this line")
-                await asyncio.sleep(0.5)
+    try:
+        while True:
+            try:
+                if phase_manager.should_switch_phase():
+                    phase_name = phase_manager.switch_phase()
+                    print(f"\n{'='*60}")
+                    print(f"🔄 PHASE SWITCH: Now {phase_name} mode")
+                    print(f"{'='*60}\n")
                 
-        except Exception as e:
-            print(f"⚠️ Producer error: {e}")
-            await asyncio.sleep(1.0)
+                # 30% chance to respond to a chat message if available
+                chat_message = None
+                if youtube_chat.is_configured() and random.random() < 0.3:
+                    chat_message = youtube_chat.get_random_unread_message()
+                
+                if chat_message:
+                    # Generate response to chat message
+                    print(f"\n💬 Responding to: [{chat_message['author']}]: {chat_message['text']}")
+                    line = await openai_service.generate_line(
+                        phase_manager.is_searching,
+                        [chat_message['text']]
+                    )
+                else:
+                    # Generate normal line with general context
+                    chat_context = youtube_chat.get_recent_context() if youtube_chat.is_configured() else None
+                    line = await openai_service.generate_line(
+                        phase_manager.is_searching,
+                        chat_context
+                    )
+                
+                voice = random.choice(voice_options)
+                
+                line_count_ref[0] += 1
+                phase_manager.increment()
+                count = line_count_ref[0]
+                phase_indicator = phase_manager.get_phase_indicator()
+                
+                print(f"\n🎤 [{count}] {phase_indicator} Voice: {voice}")
+                print(f"💬 AI Generated: {line[:100]}{'...' if len(line) > 100 else ''}")
+                
+                # Use TTS service interface
+                audio_data = await tts_service.generate(line, voice)
+                
+                if audio_data:
+                    await queue.put((audio_data, count, line))
+                    print(f"✓ Generated TTS ({len(audio_data)} bytes) - queued")
+                else:
+                    print("✗ Failed to generate audio - skipping this line")
+                    await asyncio.sleep(0.5)
+                    
+            except Exception as e:
+                print(f"⚠️ Producer error: {e}")
+                await asyncio.sleep(1.0)
+    except asyncio.CancelledError:
+        print("Producer stopped")
+        raise
 
 
 async def audio_consumer(queue: asyncio.Queue, 
@@ -502,33 +528,37 @@ async def audio_consumer(queue: asyncio.Queue,
         avatar_controller: Optional avatar controller for lip-sync
         text_display: Optional text display manager for progressive text
     """
-    while True:
-        try:
-            audio_data, count, text = await queue.get()
-            
-            if text_display and TEXT_DISPLAY_STYLE == "progressive":
-                duration = AudioPlayer.estimate_duration(text, AUDIO_SPEED)
-                await asyncio.gather(
-                    AudioPlayer.play(audio_data, AUDIO_SPEED, avatar_controller),
-                    text_display.display_progressive(text, duration)
-                )
-            else:
-                if text_display:
-                    text_display.display_full(text)
-                await AudioPlayer.play(audio_data, AUDIO_SPEED, avatar_controller)
-                if text_display:
-                    await asyncio.sleep(0.5)
-                    text_display.clear()
-            
-            print(f"✓ [{count}] Played successfully")
-            
-            queue.task_done()
-            
-            await asyncio.sleep(random.uniform(AUDIO_PAUSE_MIN, AUDIO_PAUSE_MAX))
-            
-        except Exception as e:
-            print(f"⚠️ Consumer error: {e}")
-            await asyncio.sleep(0.5)
+    try:
+        while True:
+            try:
+                audio_data, count, text = await queue.get()
+                
+                if text_display and TEXT_DISPLAY_STYLE == "progressive":
+                    duration = AudioPlayer.estimate_duration(text, AUDIO_SPEED)
+                    await asyncio.gather(
+                        AudioPlayer.play(audio_data, AUDIO_SPEED, avatar_controller),
+                        text_display.display_progressive(text, duration)
+                    )
+                else:
+                    if text_display:
+                        text_display.display_full(text)
+                    await AudioPlayer.play(audio_data, AUDIO_SPEED, avatar_controller)
+                    if text_display:
+                        await asyncio.sleep(0.5)
+                        text_display.clear()
+                
+                print(f"✓ [{count}] Played successfully")
+                
+                queue.task_done()
+                
+                await asyncio.sleep(random.uniform(AUDIO_PAUSE_MIN, AUDIO_PAUSE_MAX))
+                
+            except Exception as e:
+                print(f"⚠️ Consumer error: {e}")
+                await asyncio.sleep(0.5)
+    except asyncio.CancelledError:
+        print("Consumer stopped")
+        raise
 
 
 async def youtube_chat_monitor(youtube_chat: YouTubeChatService):
@@ -539,43 +569,79 @@ async def youtube_chat_monitor(youtube_chat: YouTubeChatService):
     
     print("📺 YouTube Chat monitoring started\n")
     
-    while True:
-        try:
-            messages = await youtube_chat.poll_chat()
-            for msg in messages:
-                print(f"💬 [{msg['author']}]: {msg['text']}")
-            
-            await asyncio.sleep(1)
-            
-        except Exception as e:
-            print(f"⚠️ Chat monitor error: {e}")
-            await asyncio.sleep(1)
+    try:
+        while True:
+            try:
+                messages = await youtube_chat.poll_chat()
+                for msg in messages:
+                    print(f"💬 [{msg['author']}]: {msg['text']}")
+                
+                await asyncio.sleep(1)
+                
+            except Exception as e:
+                print(f"⚠️ Chat monitor error: {e}")
+                await asyncio.sleep(1)
+    except asyncio.CancelledError:
+        print("Chat monitor stopped")
+        raise
 
 
 async def test_tts():
-    """Test if the TikTok TTS endpoints work."""
-    print("🔍 Testing TikTok TTS endpoints...")
+    """Test if the TTS service works."""
+    print(f"🔍 Testing {TTS_PROVIDER.upper()} TTS...")
     
-    test_voice = ENERGETIC_VOICES[0]
-    print(f"   Testing with voice: {test_voice}")
-    test_audio = TikTokTTSService.generate(test_voice, "Hello")
-    
-    if test_audio:
-        print(f"✓ TTS works with {test_voice}! Generated {len(test_audio)} bytes")
-        return True
-    
-    print("\n✗ All TTS endpoints failed")
-    print("\n🔍 Possible issues:")
-    print("   1. The TTS proxy services might be down")
-    print("   2. Network connectivity issues")
-    print("   3. API endpoints may have changed")
-    print("\n💡 Try checking if the endpoints are still active")
-    return False
+    try:
+        tts_service = TTSFactory.create(TTS_PROVIDER)
+        voice_options = VOICE_OPTIONS.get(TTS_PROVIDER, [])
+        
+        if not voice_options:
+            print("⚠️ No voices configured for this provider")
+            return False
+        
+        test_voice = voice_options[0]
+        print(f"   Testing with voice: {test_voice}")
+        test_audio = await tts_service.generate("Hello", test_voice)
+        
+        if test_audio:
+            print(f"✓ TTS works with {test_voice}! Generated {len(test_audio)} bytes")
+            return True
+        
+        print("\n✗ TTS generation failed")
+        return False
+        
+    except Exception as e:
+        print(f"\n✗ TTS Error: {e}")
+        print("\n🔍 Possible issues:")
+        if TTS_PROVIDER == "elevenlabs":
+            print("   1. Check ELEVENLABS_API_KEY in .env file")
+            print("   2. Verify your ElevenLabs account has credits")
+            print("   3. Install elevenlabs: pip install elevenlabs")
+        elif TTS_PROVIDER == "tiktok":
+            print("   1. The TTS proxy services might be down")
+            print("   2. Network connectivity issues")
+            print("   3. API endpoints may have changed")
+        return False
 
 async def main():
     """Main application entry point."""
     print("🎀✨ AI Energetic Livestreamer Started! ✨🎀")
-    print(f"Using TikTok voices: {', '.join(ENERGETIC_VOICES)}")
+    
+    # Initialize TTS service
+    try:
+        tts_service = TTSFactory.create(TTS_PROVIDER)
+        voice_options = VOICE_OPTIONS.get(TTS_PROVIDER, [])
+        
+        if not voice_options:
+            print(f"❌ No voices configured for {TTS_PROVIDER}")
+            return
+        
+        print(f"🎤 TTS Provider: {tts_service.get_provider_name()}")
+        print(f"🎵 Available voices: {', '.join(voice_options)}")
+        
+    except Exception as e:
+        print(f"\n❌ Failed to initialize TTS: {e}")
+        return
+    
     print("🤖 Powered by OpenAI for dynamic content generation")
     print("⚡ Pipeline mode: Generating next audio while current plays!")
     print("🔄 Two-phase system: SEARCHING for objects → REVEALING secret for donations")
@@ -587,80 +653,72 @@ async def main():
         print("Please set OPENAI_API_KEY in your .env file")
         return
     
-    youtube_chat = YouTubeChatService(YOUTUBE_VIDEO_ID)
-    if youtube_chat.is_configured():
-        print("📺 YouTube Chat integration: ENABLED")
-    else:
-        if not pytchat:
-            print("📺 YouTube Chat integration: DISABLED (install pytchat: pip install pytchat)")
-        else:
-            print("📺 YouTube Chat integration: DISABLED (set YOUTUBE_VIDEO_ID in .env to enable)")
+    # Disable YouTube chat for now - can enable later
+    youtube_chat = YouTubeChatService(None)
+    print("📺 YouTube Chat integration: DISABLED")
     
+    # Avatar setup - simple
     avatar_controller = None
     if ENABLE_AVATAR:
         try:
-            print("\n🎭 Initializing Live2D Avatar Controller...")
+            print("\n🎭 Connecting to VTube Studio...")
             avatar_controller = AvatarController(
-                plugin_name="Neuro-sama TTS Controller",
-                plugin_developer="AI Livestreamer",
+                plugin_name="AI VTuber",
+                plugin_developer="Livestream",
                 token_path="vts_token.json",
                 gain=AVATAR_GAIN,
                 smoothing=AVATAR_SMOOTHING
             )
             
             if await avatar_controller.connect():
-                print("✓ VTube Studio integration: ENABLED")
-                
-                # Get current model info
-                model_info = await avatar_controller.get_current_model()
-                if model_info:
-                    print(f"   Model: {model_info.get('modelName', 'Unknown')}")
-                
+                print("✓ VTube Studio connected")
                 await avatar_controller.set_emotion("happy")
             else:
-                print("⚠️ VTube Studio integration: DISABLED (connection failed)")
+                print("⚠️ VTube Studio failed")
                 avatar_controller = None
-                
         except Exception as e:
-            print(f"⚠️ Avatar controller initialization failed: {e}")
-            print("   Continuing without avatar control...")
+            print(f"⚠️ VTube Studio error: {e}")
             avatar_controller = None
     else:
-        print("\n🎭 Live2D Avatar: DISABLED (set ENABLE_AVATAR=True to enable)")
+        print("\n🎭 VTube Studio: OFF")
     
     text_display = TextDisplayManager()
     if ENABLE_TEXT_DISPLAY:
-        mode = "word-by-word" if TEXT_DISPLAY_STYLE == "progressive" else "full text"
-        print(f"\n📝 Text display: ENABLED ({mode})")
-        print(f"   File: {TEXT_DISPLAY_FILE}")
-        print("   Add this file as a Text (GDI+) source in OBS")
+        print(f"\n📝 Text display: ON → {TEXT_DISPLAY_FILE}")
+        print("   Add as Text (GDI+) source in OBS with 'Read from file' checked")
     else:
-        print("\n📝 Text display: DISABLED")
+        print("\n📝 Text display: OFF")
     
     print()
     
     if not await test_tts():
         print("\n⚠️  Continuing anyway, but TTS may fail...\n")
     
-    print("Press Ctrl+C to stop\n")
+    print("Press Ctrl+C to stop")
+    print("⚠️ Ctrl+C may take a moment to respond during audio playback\n")
     
     audio_queue = asyncio.Queue(maxsize=1)
     line_count = [0]
     phase_manager = PhaseManager()
     
     tasks = [
-        asyncio.create_task(audio_producer(audio_queue, line_count, openai_service, youtube_chat, phase_manager)),
+        asyncio.create_task(audio_producer(audio_queue, line_count, openai_service, youtube_chat, phase_manager, tts_service, voice_options)),
         asyncio.create_task(audio_consumer(audio_queue, avatar_controller, text_display)),
         asyncio.create_task(youtube_chat_monitor(youtube_chat)),
     ]
     
     try:
         await asyncio.gather(*tasks)
-    except asyncio.CancelledError:
-        pass
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        print("\n\n👋 Stopping...")
+        # Cancel all tasks
+        for task in tasks:
+            task.cancel()
+        # Wait for tasks to finish canceling
+        await asyncio.gather(*tasks, return_exceptions=True)
     finally:
         if avatar_controller:
-            print("\n🎭 Disconnecting avatar controller...")
+            print("🎭 Disconnecting avatar controller...")
             await avatar_controller.disconnect()
         
         if text_display and text_display.enabled:
@@ -669,7 +727,18 @@ async def main():
 
 
 if __name__ == "__main__":
+    import signal
+    import sys
+    
+    # Improved Ctrl+C handler
+    def signal_handler(sig, frame):
+        print("\n\n👋 Livestream ended! Thanks for watching~! 💕")
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\n\n👋 Livestream ended! Thanks for watching~! 💕")
+        sys.exit(0)
