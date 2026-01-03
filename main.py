@@ -2,12 +2,21 @@ import asyncio
 import random
 import os
 import tempfile
+import io
 from typing import Optional, List
 from dotenv import load_dotenv
 from openai import OpenAI
 from avatar_controller import AvatarController
 from tts_service import TikTokTTSService
 import pytchat
+
+try:
+    import pygame
+    pygame.mixer.init()
+    PYGAME_AVAILABLE = True
+except ImportError:
+    PYGAME_AVAILABLE = False
+    print("⚠️ pygame not installed. Install with: pip install pygame")
 
 load_dotenv()
 
@@ -345,13 +354,32 @@ class AudioPlayer:
     
     @staticmethod
     async def _play_audio(file_path: str, speed: float) -> None:
-        """Play audio file with mpv."""
-        process = await asyncio.create_subprocess_exec(
-            "mpv", "--no-video", f"--speed={speed}", "--really-quiet", file_path,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL
-        )
-        await process.wait()
+        """Play audio file using pygame (cross-platform) or mpv (if available)."""
+        # Try pygame first (cross-platform, works on Windows)
+        if PYGAME_AVAILABLE:
+            try:
+                pygame.mixer.music.load(file_path)
+                # Note: pygame doesn't support speed directly, but we can work around it
+                pygame.mixer.music.play()
+                # Wait for playback to finish
+                while pygame.mixer.music.get_busy():
+                    await asyncio.sleep(0.1)
+                return
+            except Exception as e:
+                print(f"⚠️ pygame playback failed: {e}, trying mpv...")
+        
+        # Fallback to mpv if available
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "mpv", "--no-video", f"--speed={speed}", "--really-quiet", file_path,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL
+            )
+            await process.wait()
+        except FileNotFoundError:
+            raise RuntimeError(
+                "No audio player available. Install pygame (pip install pygame) or mpv."
+            )
     
     @staticmethod
     async def _animate_avatar(audio_data: bytes, avatar_controller: AvatarController, 

@@ -102,6 +102,7 @@ class AvatarController:
                 plugin_info={
                     "plugin_name": self.plugin_name,
                     "developer": self.plugin_developer,
+                    "authentication_token_path": str(self.token_path),
                 }
             )
             
@@ -130,31 +131,46 @@ class AvatarController:
     async def _authenticate(self):
         """Authenticate with VTube Studio using saved or new token."""
         try:
-            # Try to load existing token
+            # Check if we have a saved token
             token = self._load_token()
             
             if token:
                 print("🔑 Using saved authentication token...")
                 try:
-                    await self.vts.request_authenticate(token)
+                    # Try to authenticate with saved token
+                    # The token should be automatically loaded from authentication_token_path
+                    # but we may need to set it explicitly
+                    await self.vts.request_authenticate()
                     self.authenticated = True
                     print("✓ Authenticated with saved token")
                     return
                 except Exception as e:
-                    print(f"⚠️ Saved token invalid: {e}")
+                    print(f"⚠️ Saved token invalid or expired: {e}")
                     print("   Requesting new token...")
+                    # Delete invalid token file
+                    try:
+                        if self.token_path.exists():
+                            self.token_path.unlink()
+                    except:
+                        pass
             
             # Request new token
             print("🔑 Requesting new authentication token...")
             print("   → Please click 'Allow' in VTube Studio!")
             
-            token = await self.vts.request_authenticate_token()
+            token_response = await self.vts.request_authenticate_token()
+            # Extract token from response if it's a dict, otherwise use directly
+            if isinstance(token_response, dict):
+                token = token_response.get('data', {}).get('authentication_token') or token_response.get('authentication_token')
+            else:
+                token = token_response
             
             # Save token for future use
-            self._save_token(token)
+            if token:
+                self._save_token(token)
             
             # Authenticate with new token
-            await self.vts.request_authenticate(token)
+            await self.vts.request_authenticate()
             self.authenticated = True
             print("✓ Authenticated successfully! Token saved for future use.")
             
