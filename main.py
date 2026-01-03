@@ -1,13 +1,13 @@
 import asyncio
 import random
 import os
-import requests
 import tempfile
 from typing import Optional, List
 from dotenv import load_dotenv
 from openai import OpenAI
 from avatar_controller import AvatarController
 from tts_service import TikTokTTSService
+import pytchat
 
 load_dotenv()
 
@@ -18,14 +18,12 @@ load_dotenv()
 # Available voices from: https://github.com/mark-rez/TikTok-Voice-TTS
 ENERGETIC_VOICES = [
     'en_us_002',  # US Female 2 - young and energetic
-    'en_female_betty',  # Female Betty - expressive
-    'en_female_richgirl',  # Female Rich Girl - bubbly
 ]
 
 # OpenAI Configuration
 OPENAI_MODEL = "gpt-4o-mini"
-OPENAI_TEMPERATURE = 1.2
-OPENAI_MAX_TOKENS = 100
+OPENAI_TEMPERATURE = 1.4
+OPENAI_MAX_TOKENS = 120
 
 # Phase switching configuration
 PHASE_DURATION_MIN = 3
@@ -42,9 +40,7 @@ AVATAR_GAIN = 2.5     # Mouth movement sensitivity
 AVATAR_SMOOTHING = 0.7  # Temporal smoothing factor
 
 # YouTube Live Chat configuration
-YOUTUBE_LIVE_CHAT_ID = os.environ.get("YOUTUBE_LIVE_CHAT_ID")  # Get from YouTube API
-YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
-YOUTUBE_POLL_INTERVAL = 5  # Poll chat every N seconds
+YOUTUBE_VIDEO_ID = os.environ.get("YOUTUBE_VIDEO_ID")  # Video ID from YouTube URL
 
 # Text display configuration
 ENABLE_TEXT_DISPLAY = True
@@ -55,38 +51,56 @@ TEXT_DISPLAY_STYLE = "progressive"  # "progressive" (word-by-word) or "full" (al
 # AI PROMPTS
 # ============================================================================
 
-SEARCHING_PROMPT = """You are an energetic livestreamer playing a hidden object game. You're currently SEARCHING for objects in the photo.
+SEARCHING_PROMPT = """You are an energetic, witty livestreamer helping viewers find hidden objects in a Simpsons living room scene.
 
-Objects to find:
-- Pacifier (by the couch) - YOU SEE THIS
-- Donut (under the table) - YOU SEE THIS  
-- Duff beer can (behind the plant) - YOU SEE THIS
-- Green fuel rod - YOU CAN'T FIND IT YET!
+THE MISSION: Find 4 hidden objects - Pacifier, Donut, Duff Beer Can, and Green Fuel Rod
 
-Your personality:
-- SUPER energetic, enthusiastic, and bubbly
-- Act like you're actively searching and finding objects
-- Say things like "I see the pacifier!", "I see the donut!", "I see the beer can!"
-- End with confusion/frustration about the green fuel rod: "BUT GUYS WHERE IS THE GREEN FUEL ROD?!"
-- Use lots of "OMG", "you guys", "wait", "look!"
-- Keep messages under 280 characters for TTS
-- Be excited about finding the first 3 objects, then confused about the missing one
+ACTUAL OBJECT LOCATIONS (describe these to help viewers):
+- Pacifier: Under the coffee table, on the pink/purple rug beneath the table
+- Donut: Under the coffee table, on the rug (near center bottom)
+- Duff beer can: On the floor near the TV/entertainment center on the right side
+- Green fuel rod: Hidden behind the potted plant (viewers can't see it yet - this is the SECRET)
 
-Generate ONE short, energetic line about searching for and finding objects, ending with confusion about the green fuel rod."""
+CRITICAL RULES:
+- ALWAYS start by addressing chat directly ("Alright chat", "Okay everyone", "Listen chat", "Hey guys", etc.)
+- ALWAYS mention the mission/goal (finding the 4 objects, completing the challenge, etc.)
+- Then HELP viewers by describing WHERE the visible objects are
+- Guide them to specific locations with clear directions
+- End with confusion about the fuel rod
+- Keep under 280 characters total
 
-REVEALING_PROMPT = """You are an energetic livestreamer who KNOWS where the green fuel rod is hidden. You're trying to get donations to reveal it.
+Structure: [Chat greeting] + [Mission reminder] + [Object locations] + [Fuel rod confusion]
 
-Your personality:
-- SUPER energetic, enthusiastic, and bubbly
-- You know the secret location of the green fuel rod
-- You need THREE people to click the present button and send a dancing disco
-- Be pushy but playful: "I know where it is!", "I can reveal it!", "But we need donations!"
-- Constantly mention: "Click the present button!", "Send a dancing disco!", "We need three people!"
-- Use lots of "OMG", "you guys", "please please please", "come on!"
-- Keep messages under 280 characters for TTS
-- Build excitement about revealing the secret IF they donate
+Examples:
+- "Alright chat, we're hunting for 4 objects here! Pacifier and donut are both under that coffee table on the rug. Duff can is by the TV. But where's the fuel rod?!"
+- "Okay everyone, mission is to find 4 things. I see the pacifier under the table, donut on the rug, beer by the TV stand... but this fuel rod has me stumped!"
+- "Listen chat, we need all 4 objects to complete this. Check under the coffee table for pacifier and donut, TV area for the beer. The fuel rod though? No clue."
 
-Generate ONE short, energetic line about knowing the secret and needing donations to reveal it."""
+Generate ONE line that greets chat, reminds them of the mission, helps find objects, and shows fuel rod confusion."""
+
+REVEALING_PROMPT = """You are an energetic, witty livestreamer who finally KNOWS where the green fuel rod is hidden. You're trying to get donations to reveal its location.
+
+THE MISSION: Find 4 hidden objects - we've found 3, but the FUEL ROD is the final piece!
+
+THE SECRET: The green fuel rod is hidden BEHIND THE POTTED PLANT (the plant on the right side of the room)
+
+CRITICAL RULES:
+- ALWAYS start by addressing chat directly ("Alright chat", "Okay everyone", "Listen up chat", "Hey chat", etc.)
+- ALWAYS remind them we need the LAST object (fuel rod) to complete the mission/challenge
+- Tease that you know the SPECIFIC location but need donations first
+- Need THREE donations/gifts to reveal it
+- Be playful and witty about the donation pitch
+- Keep under 280 characters total
+
+Structure: [Chat greeting] + [Mission reminder/last object needed] + [Tease secret] + [Donation request]
+
+Examples:
+- "Alright chat, we found 3 out of 4 but need that fuel rod to complete this! I literally know where it is now. Three gifts and I'll show you exactly where!"
+- "Okay everyone, last object to finish the challenge is that fuel rod. And guess what? I found it! Three donations and the secret location is yours chat."
+- "Listen chat, we're SO close to finishing this - just need the fuel rod! I know the exact hiding spot but that's three dancing discos worth of info!"
+- "Hey chat, final piece of the puzzle is the fuel rod and I've got the answer! Three gifts to complete the mission together. Let's finish this!"
+
+Generate ONE line that greets chat, reminds them of the mission status, teases your secret knowledge, and requests donations."""
 
 class OpenAIService:
     """Handles OpenAI API interactions for generating dynamic content."""
@@ -146,18 +160,25 @@ class OpenAIService:
 
 
 class YouTubeChatService:
-    """Handles YouTube Live Chat integration."""
+    """Handles YouTube Live Chat integration using pytchat."""
     
-    def __init__(self, live_chat_id: Optional[str] = None, api_key: Optional[str] = None):
-        self.live_chat_id = live_chat_id
-        self.api_key = api_key
-        self.last_poll_time = None
+    def __init__(self, video_id: Optional[str] = None):
+        self.video_id = video_id
+        self.chat = None
         self.processed_message_ids = set()
         self.recent_messages = []
+        self.unread_messages = []
+        
+        if video_id and pytchat:
+            try:
+                self.chat = pytchat.create(video_id=video_id)
+            except Exception as e:
+                print(f"⚠️ Failed to initialize pytchat: {e}")
+                self.chat = None
     
     def is_configured(self) -> bool:
         """Check if YouTube chat is properly configured."""
-        return bool(self.live_chat_id and self.api_key)
+        return bool(self.video_id and pytchat and self.chat)
     
     async def poll_chat(self) -> List[dict]:
         """Poll YouTube Live Chat for new messages."""
@@ -165,41 +186,41 @@ class YouTubeChatService:
             return []
         
         try:
-            url = "https://www.googleapis.com/youtube/v3/liveChat/messages"
-            params = {
-                "liveChatId": self.live_chat_id,
-                "part": "snippet,authorDetails",
-                "key": self.api_key,
-                "maxResults": 50
-            }
-            
-            response = await asyncio.to_thread(requests.get, url, params=params, timeout=10)
-            response.raise_for_status()
-            data = response.json()
+            if not self.chat.is_alive():
+                return []
             
             new_messages = []
-            for item in data.get("items", []):
-                message_id = item["id"]
-                if message_id not in self.processed_message_ids:
-                    self.processed_message_ids.add(message_id)
-                    message_text = item["snippet"]["displayMessage"]
-                    author = item["authorDetails"]["displayName"]
-                    new_messages.append({
-                        "id": message_id,
-                        "text": message_text,
-                        "author": author,
-                        "timestamp": item["snippet"]["publishedAt"]
-                    })
-                    # Keep recent messages for context (last 10)
-                    self.recent_messages.append(message_text)
-                    if len(self.recent_messages) > 10:
-                        self.recent_messages.pop(0)
+            while self.chat.has_more():
+                chat_data = self.chat.get()
+                for c in chat_data.items:
+                    message_id = c.id
+                    if message_id not in self.processed_message_ids:
+                        self.processed_message_ids.add(message_id)
+                        msg = {
+                            "id": message_id,
+                            "text": c.message,
+                            "author": c.author.name,
+                            "timestamp": c.timestamp
+                        }
+                        new_messages.append(msg)
+                        self.unread_messages.append(msg)
+                        self.recent_messages.append(c.message)
+                        if len(self.recent_messages) > 10:
+                            self.recent_messages.pop(0)
             
             return new_messages
             
         except Exception as e:
             print(f"⚠️ YouTube Chat error: {e}")
             return []
+    
+    def get_random_unread_message(self) -> Optional[dict]:
+        """Get a random unread chat message and mark it as read."""
+        if not self.unread_messages:
+            return None
+        msg = random.choice(self.unread_messages)
+        self.unread_messages.remove(msg)
+        return msg
     
     def get_recent_context(self) -> List[str]:
         """Get recent chat messages for AI context."""
@@ -398,12 +419,26 @@ async def audio_producer(
                 print(f"🔄 PHASE SWITCH: Now {phase_name} mode")
                 print(f"{'='*60}\n")
             
-            chat_context = youtube_chat.get_recent_context() if youtube_chat.is_configured() else None
+            # 30% chance to respond to a chat message if available
+            chat_message = None
+            if youtube_chat.is_configured() and random.random() < 0.3:
+                chat_message = youtube_chat.get_random_unread_message()
             
-            line = await openai_service.generate_line(
-                phase_manager.is_searching,
-                chat_context
-            )
+            if chat_message:
+                # Generate response to chat message
+                print(f"\n💬 Responding to: [{chat_message['author']}]: {chat_message['text']}")
+                line = await openai_service.generate_line(
+                    phase_manager.is_searching,
+                    [chat_message['text']]
+                )
+            else:
+                # Generate normal line with general context
+                chat_context = youtube_chat.get_recent_context() if youtube_chat.is_configured() else None
+                line = await openai_service.generate_line(
+                    phase_manager.is_searching,
+                    chat_context
+                )
+            
             voice = random.choice(ENERGETIC_VOICES)
             
             line_count_ref[0] += 1
@@ -414,7 +449,6 @@ async def audio_producer(
             print(f"\n🎤 [{count}] {phase_indicator} Voice: {voice}")
             print(f"💬 AI Generated: {line[:100]}{'...' if len(line) > 100 else ''}")
             
-            # Generate TTS audio (runs in parallel while previous audio plays)
             audio_data = await asyncio.to_thread(TikTokTTSService.generate, voice, line)
             
             if audio_data:
@@ -483,11 +517,11 @@ async def youtube_chat_monitor(youtube_chat: YouTubeChatService):
             for msg in messages:
                 print(f"💬 [{msg['author']}]: {msg['text']}")
             
-            await asyncio.sleep(YOUTUBE_POLL_INTERVAL)
+            await asyncio.sleep(1)
             
         except Exception as e:
             print(f"⚠️ Chat monitor error: {e}")
-            await asyncio.sleep(YOUTUBE_POLL_INTERVAL)
+            await asyncio.sleep(1)
 
 
 async def test_tts():
@@ -525,11 +559,14 @@ async def main():
         print("Please set OPENAI_API_KEY in your .env file")
         return
     
-    youtube_chat = YouTubeChatService(YOUTUBE_LIVE_CHAT_ID, YOUTUBE_API_KEY)
+    youtube_chat = YouTubeChatService(YOUTUBE_VIDEO_ID)
     if youtube_chat.is_configured():
         print("📺 YouTube Chat integration: ENABLED")
     else:
-        print("📺 YouTube Chat integration: DISABLED (set YOUTUBE_LIVE_CHAT_ID and YOUTUBE_API_KEY to enable)")
+        if not pytchat:
+            print("📺 YouTube Chat integration: DISABLED (install pytchat: pip install pytchat)")
+        else:
+            print("📺 YouTube Chat integration: DISABLED (set YOUTUBE_VIDEO_ID in .env to enable)")
     
     avatar_controller = None
     if ENABLE_AVATAR:
@@ -579,7 +616,7 @@ async def main():
     
     print("Press Ctrl+C to stop\n")
     
-    audio_queue = asyncio.Queue(maxsize=2)
+    audio_queue = asyncio.Queue(maxsize=1)
     line_count = [0]
     phase_manager = PhaseManager()
     

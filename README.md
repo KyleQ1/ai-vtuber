@@ -12,6 +12,7 @@ pip install -r requirements.txt
 Create `.env` file:
 ```
 OPENAI_API_KEY=your_key_here
+YOUTUBE_VIDEO_ID=your_video_id  # Optional: for chat integration (e.g., HCOWjMnvny8)
 ```
 
 ## VTube Studio Setup
@@ -56,6 +57,15 @@ TEXT_DISPLAY_STYLE = "progressive"  # Shows text word-by-word as spoken
    - `"full"` - Entire text appears at once, then clears when done
 
 The text automatically clears between lines and stays synchronized with the audio playback!
+
+## YouTube Live Chat Integration (Optional)
+
+To enable chat reading, just add your video ID to `.env`:
+```
+YOUTUBE_VIDEO_ID=HCOWjMnvny8
+```
+
+The AI will read chat messages and use them as context. No API keys needed! Uses `pytchat` library.
 
 ## Usage
 
